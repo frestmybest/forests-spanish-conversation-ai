@@ -18,12 +18,15 @@ export default async function handler(req, res) {
     const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1alpha' } });
     const now = Date.now();
 
+    // Deliberately NOT setting liveConnectConstraints. If it's set without a
+    // fieldMask, the server treats it as the ENTIRE session setup and silently
+    // discards the setup message the browser sends (voice, system instruction,
+    // audio output, transcription) — which kills the session.
     const token = await ai.authTokens.create({
       config: {
         uses: 1,
         expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
         newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
-        liveConnectConstraints: { model: MODEL },
         httpOptions: { apiVersion: 'v1alpha' }
       }
     });
