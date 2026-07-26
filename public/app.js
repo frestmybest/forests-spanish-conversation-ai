@@ -227,31 +227,23 @@ async function start() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    // First message must be the session setup, and nothing else may be sent
+    // until the server answers with setupComplete.
     ws.send(JSON.stringify({
-      config: {
+      setup: {
         model: 'models/' + model,
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: el('voice').value } }
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: el('voice').value } }
+          }
         },
+        systemInstruction: { parts: [{ text: buildSystemInstruction() }] },
         inputAudioTranscription: {},
-        outputAudioTranscription: {},
-        systemInstruction: { parts: [{ text: buildSystemInstruction() }] }
+        outputAudioTranscription: {}
       }
     }));
-
-    // Nudge the model to speak first.
-    ws.send(JSON.stringify({
-      clientContent: {
-        turns: [{ role: 'user', parts: [{ text: '¡Hola!' }] }],
-        turnComplete: true
-      }
-    }));
-
-    startMic();
-    running = true;
-    stopBtn.disabled = false;
-    setStatus('Live — start talking', true);
+    setStatus('Starting session…', false);
   };
 
   ws.onmessage = async (event) => {
@@ -263,6 +255,21 @@ async function start() {
 
     if (msg.error) {
       showError('API error: ' + (msg.error.message || JSON.stringify(msg.error)));
+      return;
+    }
+
+    // Setup accepted — now it's safe to open the mic and get the AI talking.
+    if (msg.setupComplete) {
+      ws.send(JSON.stringify({
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text: '¡Hola!' }] }],
+          turnComplete: true
+        }
+      }));
+      startMic();
+      running = true;
+      stopBtn.disabled = false;
+      setStatus('Live — start talking', true);
       return;
     }
 
