@@ -17,6 +17,7 @@ let playCtx = null;
 let playHead = 0;
 let liveSources = [];
 let running = false;
+let gotSetupComplete = false;
 
 let userBubble = null;
 let aiBubble = null;
@@ -251,7 +252,8 @@ async function start() {
     if (payload instanceof Blob) payload = await payload.text();
 
     let msg;
-    try { msg = JSON.parse(payload); } catch (e) { return; }
+    try { msg = JSON.parse(payload); } catch (e) { console.warn('Non-JSON message:', payload); return; }
+    console.log('[live] server message:', msg);
 
     if (msg.error) {
       showError('API error: ' + (msg.error.message || JSON.stringify(msg.error)));
@@ -260,6 +262,7 @@ async function start() {
 
     // Setup accepted — now it's safe to open the mic and get the AI talking.
     if (msg.setupComplete) {
+      gotSetupComplete = true;
       ws.send(JSON.stringify({
         clientContent: {
           turns: [{ role: 'user', parts: [{ text: '¡Hola!' }] }],
@@ -310,9 +313,15 @@ async function start() {
   };
 
   ws.onclose = (e) => {
-    if (running) {
-      const why = e.reason ? ' (' + e.reason + ')' : '';
-      showError('The conversation closed' + why + '. Hit “Start conversation” to pick it back up.');
+    console.log('[live] closed — code:', e.code, 'reason:', e.reason || '(none given)');
+    const detail = 'code ' + e.code + (e.reason ? ': ' + e.reason : '');
+    if (!gotSetupComplete) {
+      showError(
+        'The session closed before it finished starting (' + detail + '). ' +
+        'Open the browser console (F12) for the full message.'
+      );
+    } else if (running) {
+      showError('The conversation closed (' + detail + '). Hit “Start conversation” to pick it back up.');
     }
     cleanup();
   };
@@ -338,6 +347,7 @@ function startMic() {
 
 function cleanup() {
   running = false;
+  gotSetupComplete = false;
   stopPlayback();
 
   if (workletNode) { try { workletNode.disconnect(); } catch (e) {} workletNode = null; }
