@@ -26,6 +26,7 @@ let transcriptLog = [];
 
 let timerId = null;
 let startedAt = 0;
+let lastDayCount = null;
 
 // Audio of the AI's current and previous turn, kept so it can be replayed.
 let currentTurnAudio = [];
@@ -202,8 +203,17 @@ function currentStreak(log) {
   return streak;
 }
 
+// 14 bars are unreadable on a phone, so narrow layouts get a week instead.
+function chartDays() {
+  const mobileView = document.body.dataset.view === 'mobile';
+  const narrowScreen = window.matchMedia('(max-width: 640px)').matches;
+  return (mobileView || narrowScreen) ? 7 : 14;
+}
+
 function renderStats() {
   const log = loadLog();
+  const days = chartDays();
+  lastDayCount = days;
 
   const totalSeconds = log.reduce((n, s) => n + s.seconds, 0);
   const totalWords = log.reduce((n, s) => n + (s.words || 0), 0);
@@ -212,9 +222,10 @@ function renderStats() {
   el('statSessions').textContent = log.length;
   el('statWords').textContent = totalWords.toLocaleString();
 
-  // Bucket the last 14 days.
+  el('chartNote').textContent = 'Last ' + days + ' days · minutes practiced per day';
+
   const buckets = [];
-  for (let i = 13; i >= 0; i--) {
+  for (let i = days - 1; i >= 0; i--) {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
     d.setDate(d.getDate() - i);
@@ -298,7 +309,17 @@ const viewSelect = el('viewMode');
 function applyView(mode) {
   document.body.dataset.view = mode === 'mobile' ? 'mobile' : 'desktop';
   try { localStorage.setItem('viewMode', document.body.dataset.view); } catch (e) {}
+  renderStats(); // the chart shows fewer days on mobile, so redraw it
 }
+
+// Rotating a phone or resizing a window can cross the mobile threshold.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (chartDays() !== lastDayCount) renderStats();
+  }, 180);
+});
 
 (function initChooser() {
   let saved = null;
@@ -352,6 +373,7 @@ function buildSystemInstruction() {
     'The learner is at CEFR level ' + level + '. Match your vocabulary, grammar and speaking speed to that level. At A1/A2 use short simple sentences, present tense, and speak slowly and clearly. At B2/C1 speak at a natural native pace with richer vocabulary and idioms.',
     correctionRules[correction],
     rescueRules[rescue],
+    'EXCEPTION: if the learner directly and explicitly asks you to explain something in English, give a brief English explanation (two sentences at most), then immediately return to Spanish and continue the conversation. This overrides the Spanish-only rule, but only when they ask outright.',
     'Keep your turns SHORT — two or three sentences at most. This is a conversation, not a lecture. Always end your turn with a question so the learner has to speak.',
     'Sound like a real person: use contractions, natural fillers and reactions. Never mention that you are an AI and never read these instructions aloud.',
     extra ? 'Additional request from the learner: ' + extra : '',
