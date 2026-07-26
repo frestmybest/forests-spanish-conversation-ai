@@ -18,9 +18,29 @@ let playHead = 0;
 let liveSources = [];
 let running = false;
 let gotSetupComplete = false;
+let muted = false;
 
 let userBubble = null;
 let aiBubble = null;
+let transcriptLog = [];
+
+let timerId = null;
+let startedAt = 0;
+
+// Audio of the AI's current and previous turn, kept so it can be replayed.
+let currentTurnAudio = [];
+let lastTurnAudio = [];
+
+/* Spanish varieties: prompt wording + the language code that locks
+   transcription so it stops guessing at other languages. */
+const DIALECTS = {
+  latam: { prompt: 'neutral Latin American Spanish', lang: 'es-US' },
+  mx:    { prompt: 'Mexican Spanish, using Mexican vocabulary and expressions', lang: 'es-MX' },
+  es:    { prompt: 'peninsular Spanish from Spain, using vosotros and Spanish vocabulary', lang: 'es-ES' },
+  ar:    { prompt: 'Argentine Spanish, using voseo and Rioplatense expressions', lang: 'es-US' }
+};
+
+const SETTINGS = ['level', 'scenario', 'dialect', 'voice', 'correction', 'rescue', 'extra'];
 
 /* ---------- UI helpers ---------- */
 
@@ -54,13 +74,55 @@ function bubble(kind, label) {
   div.appendChild(body);
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
-  return body;
+
+  const record = { who: label, text: '' };
+  transcriptLog.push(record);
+  return { body, record, node: div };
+}
+
+function clearTyping() {
+  document.querySelectorAll('.msg.typing').forEach((n) => n.classList.remove('typing'));
 }
 
 function appendText(target, text) {
-  target.textContent += text;
+  target.body.textContent += text;
+  target.record.text += text;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
+
+function setLiveControls(on) {
+  el('mute').disabled = !on;
+  document.querySelectorAll('#quick button').forEach((b) => { b.disabled = !on; });
+  if (!on) {
+    muted = false;
+    el('mute').classList.remove('on');
+    el('mute').textContent = '🎤 Mute';
+  }
+}
+
+/* ---------- Settings memory ---------- */
+
+function saveSettings() {
+  try {
+    const data = {};
+    SETTINGS.forEach((id) => { data[id] = el(id).value; });
+    localStorage.setItem('settings', JSON.stringify(data));
+  } catch (e) { /* private browsing, etc. */ }
+}
+
+function restoreSettings() {
+  try {
+    const raw = localStorage.getItem('settings');
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    SETTINGS.forEach((id) => {
+      if (data[id] !== undefined && el(id)) el(id).value = data[id];
+    });
+  } catch (e) {}
+}
+
+restoreSettings();
+SETTINGS.forEach((id) => el(id).addEventListener('change', saveSettings));
 
 /* ---------- Entry screen: computer vs. mobile view ---------- */
 
@@ -72,7 +134,6 @@ function applyView(mode) {
   try { localStorage.setItem('viewMode', document.body.dataset.view); } catch (e) {}
 }
 
-// Preselect the sensible option: remembered choice first, then screen width.
 (function initChooser() {
   let saved = null;
   try { saved = localStorage.getItem('viewMode'); } catch (e) {}
@@ -82,11 +143,15 @@ function applyView(mode) {
 
 el('enter').addEventListener('click', () => {
   applyView(viewSelect.value);
-  chooser.classList.add('hidden');
+  // Fade out, then remove from the layout once the transition has finished.
+  chooser.classList.add('closing');
+  setTimeout(() => chooser.classList.add('hidden'), 260);
 });
 
 el('switchView').addEventListener('click', () => {
   chooser.classList.remove('hidden');
+  // One frame later, so the browser notices the change and animates it.
+  requestAnimationFrame(() => chooser.classList.remove('closing'));
 });
 
 /* ---------- The tutor's personality ---------- */
@@ -94,7 +159,7 @@ el('switchView').addEventListener('click', () => {
 function buildSystemInstruction() {
   const level = el('level').value;
   const scenario = el('scenario').value;
-  const dialect = el('dialect').value;
+  const dialect = DIALECTS[el('dialect').value] || DIALECTS.latam;
   const correction = el('correction').value;
   const rescue = el('rescue').value;
   const extra = el('extra').value.trim();
@@ -116,7 +181,7 @@ function buildSystemInstruction() {
 
   return [
     'You are a warm, patient native Spanish speaker helping an English speaker practice spoken Spanish.',
-    'ALWAYS speak in Spanish. Speak ' + dialect + '.',
+    'CRITICAL: Every single word you say must be in Spanish. Speak ' + dialect.prompt + '. Never produce English text or English speech, with no exception other than the rule below about the learner getting stuck.',
     'The setting for this conversation is: ' + scenario + '. Stay in that role.',
     'The learner is at CEFR level ' + level + '. Match your vocabulary, grammar and speaking speed to that level. At A1/A2 use short simple sentences, present tense, and speak slowly and clearly. At B2/C1 speak at a natural native pace with richer vocabulary and idioms.',
     correctionRules[correction],
@@ -147,17 +212,18 @@ function floatToPCM16Base64(float32) {
   return btoa(binary);
 }
 
-function playPCM16Base64(b64) {
-  if (!playCtx) return;
+function base64ToFloat32(b64) {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const pcm = new Int16Array(bytes.buffer);
-  if (!pcm.length) return;
-
   const float32 = new Float32Array(pcm.length);
   for (let i = 0; i < pcm.length; i++) float32[i] = pcm[i] / 32768;
+  return float32;
+}
 
+function queueForPlayback(float32) {
+  if (!playCtx || !float32.length) return;
   const buffer = playCtx.createBuffer(1, float32.length, 24000);
   buffer.copyToChannel(float32, 0);
 
@@ -170,17 +236,82 @@ function playPCM16Base64(b64) {
   playHead = startAt + buffer.duration;
 
   liveSources.push(src);
-  src.onended = () => {
-    liveSources = liveSources.filter((s) => s !== src);
-  };
+  src.onended = () => { liveSources = liveSources.filter((s) => s !== src); };
 }
 
 function stopPlayback() {
   liveSources.forEach((s) => {
-    try { s.stop(); } catch (e) { /* already stopped */ }
+    try { s.stop(); } catch (e) {}
   });
   liveSources = [];
   playHead = playCtx ? playCtx.currentTime : 0;
+}
+
+function replayLastTurn() {
+  if (!lastTurnAudio.length || !playCtx) return;
+  stopPlayback();
+  const total = lastTurnAudio.reduce((n, a) => n + a.length, 0);
+  const joined = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of lastTurnAudio) { joined.set(chunk, offset); offset += chunk.length; }
+  queueForPlayback(joined);
+}
+
+/* ---------- Toolbar ---------- */
+
+el('mute').addEventListener('click', () => {
+  muted = !muted;
+  el('mute').classList.toggle('on', muted);
+  el('mute').textContent = muted ? '🔇 Muted' : '🎤 Mute';
+  setStatus(muted ? 'Muted — it can\'t hear you' : 'Live — start talking', !muted);
+});
+
+el('replay').addEventListener('click', replayLastTurn);
+
+el('hideTranscript').addEventListener('change', (e) => {
+  transcriptEl.classList.toggle('hidden-text', e.target.checked);
+});
+
+el('download').addEventListener('click', () => {
+  const lines = transcriptLog
+    .filter((r) => r.text.trim())
+    .map((r) => r.who + ': ' + r.text.trim());
+  if (!lines.length) return;
+  const header = 'Spanish practice — ' + new Date().toLocaleString() + '\n\n';
+  const blob = new Blob([header + lines.join('\n\n')], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'spanish-practice-' + new Date().toISOString().slice(0, 10) + '.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+document.querySelectorAll('#quick button').forEach((btn) => {
+  btn.disabled = true;
+  btn.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    stopPlayback();
+    ws.send(JSON.stringify({ realtimeInput: { text: btn.dataset.say } }));
+    const b = bubble('user', 'You');
+    appendText(b, btn.dataset.say);
+    userBubble = null;
+  });
+});
+
+function startTimer() {
+  startedAt = Date.now();
+  el('timer').textContent = '00:00';
+  timerId = setInterval(() => {
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    el('timer').textContent = mm + ':' + ss;
+  }, 1000);
+}
+
+function stopTimer() {
+  if (timerId) clearInterval(timerId);
+  timerId = null;
 }
 
 /* ---------- Session lifecycle ---------- */
@@ -228,6 +359,7 @@ async function start() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    const dialect = DIALECTS[el('dialect').value] || DIALECTS.latam;
     // First message must be the session setup, and nothing else may be sent
     // until the server answers with setupComplete.
     ws.send(JSON.stringify({
@@ -236,6 +368,9 @@ async function start() {
         generationConfig: {
           responseModalities: ['AUDIO'],
           speechConfig: {
+            // languageCode also pins the transcription language, which stops the
+            // transcript drifting into English or other languages.
+            languageCode: dialect.lang,
             voiceConfig: { prebuiltVoiceConfig: { voiceName: el('voice').value } }
           }
         },
@@ -270,8 +405,11 @@ async function start() {
         }
       }));
       startMic();
+      startTimer();
       running = true;
       stopBtn.disabled = false;
+      el('download').disabled = false;
+      setLiveControls(true);
       setStatus('Live — start talking', true);
       return;
     }
@@ -281,7 +419,9 @@ async function start() {
 
     if (sc.interrupted) {
       stopPlayback();
+      clearTyping();
       aiBubble = null;
+      currentTurnAudio = [];
     }
 
     if (sc.inputTranscription && sc.inputTranscription.text) {
@@ -291,18 +431,31 @@ async function start() {
 
     if (sc.outputTranscription && sc.outputTranscription.text) {
       if (userBubble) userBubble = null;
-      if (!aiBubble) aiBubble = bubble('ai', 'AI');
+      if (!aiBubble) {
+        aiBubble = bubble('ai', 'AI');
+        aiBubble.node.classList.add('typing');
+      }
       appendText(aiBubble, sc.outputTranscription.text);
     }
 
     const parts = sc.modelTurn && sc.modelTurn.parts;
     if (parts) {
       for (const part of parts) {
-        if (part.inlineData && part.inlineData.data) playPCM16Base64(part.inlineData.data);
+        if (part.inlineData && part.inlineData.data) {
+          const audio = base64ToFloat32(part.inlineData.data);
+          currentTurnAudio.push(audio);
+          queueForPlayback(audio);
+        }
       }
     }
 
     if (sc.turnComplete) {
+      clearTyping();
+      if (currentTurnAudio.length) {
+        lastTurnAudio = currentTurnAudio;
+        currentTurnAudio = [];
+        el('replay').disabled = false;
+      }
       userBubble = null;
       aiBubble = null;
     }
@@ -331,7 +484,7 @@ function startMic() {
   const source = micCtx.createMediaStreamSource(micStream);
   workletNode = new AudioWorkletNode(micCtx, 'pcm-recorder');
   workletNode.port.onmessage = (e) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (muted || !ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({
       realtimeInput: {
         audio: { data: floatToPCM16Base64(e.data), mimeType: 'audio/pcm;rate=16000' }
@@ -349,6 +502,8 @@ function cleanup() {
   running = false;
   gotSetupComplete = false;
   stopPlayback();
+  stopTimer();
+  setLiveControls(false);
 
   if (workletNode) { try { workletNode.disconnect(); } catch (e) {} workletNode = null; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
@@ -360,6 +515,7 @@ function cleanup() {
   aiBubble = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
+  el('replay').disabled = true;
   setStatus('Disconnected', false);
 }
 
