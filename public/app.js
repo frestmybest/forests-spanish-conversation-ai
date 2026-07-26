@@ -84,6 +84,18 @@ function clearTyping() {
   document.querySelectorAll('.msg.typing').forEach((n) => n.classList.remove('typing'));
 }
 
+function resetTranscript() {
+  transcriptLog = [];
+  userBubble = null;
+  aiBubble = null;
+  transcriptEl.innerHTML = '';
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.id = 'empty';
+  empty.textContent = 'Listening… start talking in Spanish whenever you\'re ready.';
+  transcriptEl.appendChild(empty);
+}
+
 function appendText(target, text) {
   target.body.textContent += text;
   target.record.text += text;
@@ -123,6 +135,160 @@ function restoreSettings() {
 
 restoreSettings();
 SETTINGS.forEach((id) => el(id).addEventListener('change', saveSettings));
+
+/* ---------- Practice history ----------
+   Every finished session is appended to localStorage, so the chart survives
+   refreshes and browser restarts. It lives on this device only — clearing your
+   browser's site data for this site wipes it. */
+
+const LOG_KEY = 'practiceLog';
+
+function loadLog() {
+  try {
+    const raw = localStorage.getItem(LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+
+function saveLog(log) {
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(log)); } catch (e) {}
+}
+
+function dayKey(ts) {
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+
+function countMyWords() {
+  return transcriptLog
+    .filter((r) => r.who === 'You')
+    .reduce((n, r) => n + r.text.trim().split(/\s+/).filter(Boolean).length, 0);
+}
+
+// Called once per session, from cleanup(). startedAt is zeroed so a single
+// session can't be double-counted when both stop() and onclose fire.
+function recordSession() {
+  if (!startedAt) return;
+  const seconds = Math.round((Date.now() - startedAt) / 1000);
+  const start = startedAt;
+  startedAt = 0;
+  if (seconds < 10) return; // ignore accidental taps
+
+  const log = loadLog();
+  log.push({ start, seconds, words: countMyWords() });
+  saveLog(log.slice(-500));
+  renderStats();
+}
+
+function formatDuration(totalSeconds) {
+  const m = Math.round(totalSeconds / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function currentStreak(log) {
+  const days = new Set(log.map((s) => dayKey(s.start)));
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  // A streak stays alive until you miss a whole day, so start from yesterday
+  // if you haven't practiced yet today.
+  if (!days.has(dayKey(cursor.getTime()))) cursor.setDate(cursor.getDate() - 1);
+  let streak = 0;
+  while (days.has(dayKey(cursor.getTime()))) {
+    streak++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+function renderStats() {
+  const log = loadLog();
+
+  const totalSeconds = log.reduce((n, s) => n + s.seconds, 0);
+  const totalWords = log.reduce((n, s) => n + (s.words || 0), 0);
+  el('statTotal').textContent = log.length ? formatDuration(totalSeconds) : '0m';
+  el('statStreak').textContent = currentStreak(log);
+  el('statSessions').textContent = log.length;
+  el('statWords').textContent = totalWords.toLocaleString();
+
+  // Bucket the last 14 days.
+  const buckets = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    buckets.push({ date: d, key: dayKey(d.getTime()), seconds: 0 });
+  }
+  const byKey = {};
+  buckets.forEach((b) => { byKey[b.key] = b; });
+  log.forEach((s) => {
+    const b = byKey[dayKey(s.start)];
+    if (b) b.seconds += s.seconds;
+  });
+
+  const peak = Math.max(60, ...buckets.map((b) => b.seconds));
+  const todayKey = dayKey(Date.now());
+  const chart = el('chart');
+  chart.innerHTML = '';
+
+  buckets.forEach((b) => {
+    const bar = document.createElement('div');
+    bar.className = 'bar' + (b.key === todayKey ? ' today' : '') + (b.seconds ? '' : ' empty');
+    bar.title = b.date.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }) +
+      ' — ' + (b.seconds ? formatDuration(b.seconds) : 'no practice');
+
+    const track = document.createElement('div');
+    track.className = 'track';
+    const fill = document.createElement('div');
+    fill.className = 'fill';
+    track.appendChild(fill);
+
+    const tag = document.createElement('em');
+    tag.textContent = b.date.toLocaleDateString(undefined, { weekday: 'narrow' });
+
+    bar.appendChild(track);
+    bar.appendChild(tag);
+    chart.appendChild(bar);
+
+    // Set the height a frame later so the CSS transition actually animates.
+    requestAnimationFrame(() => {
+      fill.style.height = b.seconds ? Math.max(4, (b.seconds / peak) * 100) + '%' : '2px';
+    });
+  });
+
+  const list = el('sessionList');
+  list.innerHTML = '';
+  const recent = log.slice(-6).reverse();
+  if (!recent.length) {
+    const li = document.createElement('li');
+    li.className = 'noData';
+    li.textContent = 'No sessions yet. Your practice history will build up here.';
+    list.appendChild(li);
+    return;
+  }
+  recent.forEach((s) => {
+    const d = new Date(s.start);
+    const li = document.createElement('li');
+    const when = document.createElement('span');
+    when.textContent = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+      ' at ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const how = document.createElement('b');
+    how.textContent = formatDuration(s.seconds) + (s.words ? ' · ' + s.words + ' words' : '');
+    li.appendChild(when);
+    li.appendChild(how);
+    list.appendChild(li);
+  });
+}
+
+el('clearStats').addEventListener('click', () => {
+  if (!loadLog().length) return;
+  if (!confirm('Delete your entire practice history? This cannot be undone.')) return;
+  try { localStorage.removeItem(LOG_KEY); } catch (e) {}
+  renderStats();
+});
+
+renderStats();
 
 /* ---------- Entry screen: computer vs. mobile view ---------- */
 
@@ -318,6 +484,7 @@ function stopTimer() {
 
 async function start() {
   clearError();
+  resetTranscript();
   startBtn.disabled = true;
   setStatus('Connecting…', false);
 
@@ -501,8 +668,10 @@ function startMic() {
 function cleanup() {
   running = false;
   gotSetupComplete = false;
+  recordSession(); // must run before the transcript is touched
   stopPlayback();
   stopTimer();
+  clearTyping();
   setLiveControls(false);
 
   if (workletNode) { try { workletNode.disconnect(); } catch (e) {} workletNode = null; }
@@ -527,4 +696,8 @@ function stop() {
 
 startBtn.addEventListener('click', start);
 stopBtn.addEventListener('click', stop);
-window.addEventListener('beforeunload', () => { if (ws) ws.close(); });
+// Closing the tab mid-session still counts the practice time.
+window.addEventListener('beforeunload', () => {
+  recordSession();
+  if (ws) ws.close();
+});
