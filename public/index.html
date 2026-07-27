@@ -21,6 +21,10 @@
   select,textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);
     border-radius:9px;padding:10px 11px;font-size:.95rem;font-family:inherit}
   textarea{min-height:70px;resize:vertical}
+  #speedLabel{color:var(--accent);text-transform:none;letter-spacing:0}
+  input[type=range]{width:100%;accent-color:var(--accent);background:transparent;
+    margin:12px 0 2px;cursor:pointer;display:block}
+  .rangeEnds{display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted)}
   .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:6px}
   button{border:0;border-radius:10px;padding:13px 22px;font-size:1rem;font-weight:600;cursor:pointer}
   #start{background:var(--accent);color:#fff}
@@ -267,6 +271,11 @@
         </select>
       </div>
       <div>
+        <label for="speed">Speaking speed — <span id="speedLabel">Normal</span></label>
+        <input type="range" id="speed" min="1" max="5" step="1" value="3">
+        <div class="rangeEnds"><span>Slowest</span><span>Native</span></div>
+      </div>
+      <div>
         <label for="rescue">If you get stuck</label>
         <select id="rescue">
           <option value="spanish" selected>Help me in Spanish only</option>
@@ -298,9 +307,7 @@
 
     <div class="quick" id="quick">
       <button data-say="¿Puedes repetir eso, por favor?">Repeat that<span class="sub">¿Puedes repetir?</span></button>
-      <button data-say="Más despacio, por favor.">Slower<span class="sub">Más despacio</span></button>
       <button data-say="Please explain what you just said in English, then go straight back to Spanish.">Explain in English<span class="sub">En inglés</span></button>
-      <button data-say="¿Qué significa eso?">What's that mean?<span class="sub">¿Qué significa?</span></button>
       <button data-say="No entiendo. ¿Puedes decirlo de otra manera?">I don't understand<span class="sub">No entiendo</span></button>
       <button data-say="Cambiemos de tema, por favor.">Change topic<span class="sub">Cambiemos de tema</span></button>
     </div>
