@@ -41,7 +41,22 @@ const DIALECTS = {
   ar:    { prompt: 'Argentine Spanish, using voseo and Rioplatense expressions', lang: 'es-US' }
 };
 
-const SETTINGS = ['level', 'scenario', 'dialect', 'voice', 'correction', 'rescue', 'extra'];
+const SETTINGS = ['level', 'scenario', 'dialect', 'voice', 'correction', 'rescue', 'extra', 'speed'];
+
+/* The Live API has no speaking-rate parameter, so speed is steered by
+   instruction. Changing it mid-session pushes a silent note into the
+   conversation history rather than starting the session over. */
+const SPEEDS = {
+  1: { name: 'Very slow',  prompt: 'Speak VERY slowly and deliberately, leaving clear pauses between words, as if talking to someone on their very first day of Spanish.' },
+  2: { name: 'Slow',       prompt: 'Speak slowly and clearly, noticeably slower than a normal conversation.' },
+  3: { name: 'Normal',     prompt: 'Speak at a relaxed, moderate conversational pace.' },
+  4: { name: 'Brisk',      prompt: 'Speak at a natural, brisk conversational pace.' },
+  5: { name: 'Native pace',prompt: 'Speak at full natural native speed, exactly as you would with another native speaker, including normal contractions and linking between words.' }
+};
+
+function currentSpeed() {
+  return SPEEDS[el('speed').value] || SPEEDS[3];
+}
 
 /* ---------- UI helpers ---------- */
 
@@ -136,6 +151,35 @@ function restoreSettings() {
 
 restoreSettings();
 SETTINGS.forEach((id) => el(id).addEventListener('change', saveSettings));
+
+/* ---------- Speaking speed ---------- */
+
+function updateSpeedLabel() {
+  el('speedLabel').textContent = currentSpeed().name;
+}
+
+// Tell a session that's already running to change pace. turnComplete:false
+// appends the note to context without making the model reply to it.
+function pushSpeedChange() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !gotSetupComplete) return;
+  ws.send(JSON.stringify({
+    clientContent: {
+      turns: [{
+        role: 'user',
+        parts: [{ text: '[Instruction — do not mention or reply to this] ' + currentSpeed().prompt }]
+      }],
+      turnComplete: false
+    }
+  }));
+}
+
+let speedTimer = null;
+el('speed').addEventListener('input', updateSpeedLabel);
+el('speed').addEventListener('change', () => {
+  clearTimeout(speedTimer);
+  speedTimer = setTimeout(pushSpeedChange, 400); // wait until they stop dragging
+});
+updateSpeedLabel();
 
 /* ---------- Practice history ----------
    Every finished session is appended to localStorage, so the chart survives
@@ -370,7 +414,8 @@ function buildSystemInstruction() {
     'You are a warm, patient native Spanish speaker helping an English speaker practice spoken Spanish.',
     'CRITICAL: Every single word you say must be in Spanish. Speak ' + dialect.prompt + '. Never produce English text or English speech, with no exception other than the rule below about the learner getting stuck.',
     'The setting for this conversation is: ' + scenario + '. Stay in that role.',
-    'The learner is at CEFR level ' + level + '. Match your vocabulary, grammar and speaking speed to that level. At A1/A2 use short simple sentences, present tense, and speak slowly and clearly. At B2/C1 speak at a natural native pace with richer vocabulary and idioms.',
+    'The learner is at CEFR level ' + level + '. Match your vocabulary and grammar to that level. At A1/A2 use short simple sentences and mostly present tense. At B2/C1 use richer vocabulary and idioms.',
+    'SPEAKING SPEED (this overrides any other guidance about pace): ' + currentSpeed().prompt,
     correctionRules[correction],
     rescueRules[rescue],
     'EXCEPTION: if the learner directly and explicitly asks you to explain something in English, give a brief English explanation (two sentences at most), then immediately return to Spanish and continue the conversation. This overrides the Spanish-only rule, but only when they ask outright.',
